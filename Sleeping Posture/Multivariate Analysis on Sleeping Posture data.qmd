@@ -1,0 +1,480 @@
+---
+title: "Multivariate Analysis - Sleeping Posture Analysis"
+format: pdf
+editor: visual
+---
+
+# Assignment 1:
+
+```{r, warning=FALSE, results='hide', message=FALSE}
+#Importing libraries
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(MASS)
+library(gridExtra)
+library(e1071)
+library(pls)
+```
+
+### 1. Loading the dataset
+
+```{r}
+#Loading the dataset
+pressure_data_full = read.csv("Pressure_Data.csv")
+
+#Total number of rows in the data set
+n = nrow(pressure_data_full)
+
+#Setting seed to my roll number
+set.seed(24222076)
+
+#Selecting the 400 random subset
+subset_observations = sample(1:n, 400)
+
+#storing the selected subset
+pressure_data = pressure_data_full[subset_observations, ]
+```
+
+### 2. Data Cleaning and Visualization
+
+```{r}
+#converting to factor variables
+pressure_data$Mattress_type = as.factor(pressure_data$Mattress_type)
+pressure_data$Position = as.factor(pressure_data$Position)
+pressure_data$Subject = as.factor(pressure_data$Subject)
+pressure_data$Posture = as.numeric(factor(pressure_data$Posture, 
+                                  levels = c("Supine","Left","Right"),
+                                  labels=c(1,2,3)))
+
+#Checking whether any of the factor column contains null values
+col_names_na_check = c("Mattress_type","Position","Subject","Posture")
+cat("Does any of the factor variables contains null values: " ,
+    any(is.na(pressure_data[,col_names_na_check])))
+```
+
+Now we look into the **density** plot. We group **9 plots** into **one** group. In **total** there will be **16 plots**. Using **grid.arrange()** we plot all those graphs.
+
+```{r}
+#Creating function to plot graphs in group
+plot_all_graph = function(pressure_data){
+  #changing into the pivot or long format
+  pressure_longer = pressure_data |> 
+    pivot_longer(cols = starts_with("V"), 
+                 names_to = "variable", 
+                 values_to = "pressure")
+  #Creating a list to store plots
+  plot_list = list()
+  for(i in 1:9) {
+    starts_with = (i-1) * 16 + 1
+    ends_with = i * 16
+    
+    var_to_plot = paste0('V', starts_with:ends_with)
+    
+    plot_subset = pressure_longer |> filter(variable %in% var_to_plot)
+    
+    p = ggplot(plot_subset, aes(pressure, color = variable)) +
+      geom_density(linewidth = 0.7) +
+      theme_minimal()+
+      theme(legend.position = 'none')
+    
+    plot_list[[i]] = p
+  }
+  grid.arrange(grobs = plot_list, ncol = 3)
+}
+
+#Calling the function to plot
+plot_all_graph(pressure_data)
+```
+
+The pressure measurement variables (V1 to V144) exhibit a **right-skewed distribution**, indicating a potential bias towards lower values. To address this, I apply a **log1p transformation**, which helps normalize the data and reduces skewness. This transformation ensures a more symmetric distribution, **improving the effectiveness** of subsequent analyses.
+
+```{r}
+#Applying log to the variables
+pressure_data[,2:145] = log1p(pressure_data[,2:145])
+plot_all_graph(pressure_data)
+```
+
+We can see that the skewness is **reduced** for many variables.
+
+### 3. Hierarchical and K-Means clustering
+
+**Hierarchical Clustering:**
+
+We now apply hierarchical clustering on **pressure_map_data** using four linkage methods: **single linkage**, which uses the shortest distance between clusters; **complete linkage**, which uses the longest distance; **average linkage**, which calculates the average distance; and **Ward linkage**, which minimizes within-cluster variance. **Euclidean distance** is used for all methods. The clustering results are visualized through dendrograms to compare the different methods.
+
+```{r}
+#Taking the numerical variable for clustering
+pressure_map_data = pressure_data[,2:145]
+
+#Doing hierarchial clustering using different linkage
+pressure_map_cluster_single = hclust(
+  dist(pressure_map_data, method = "euclidean"), method = "single")
+pressure_map_cluster_complete = hclust(
+  dist(pressure_map_data, method = "euclidean"), method = "complete")
+pressure_map_cluster_average = hclust(
+  dist(pressure_map_data, method = "euclidean"), method = "average")
+pressure_map_cluster_ward = hclust(
+  dist(pressure_map_data, method = "euclidean"), method = "ward.D2")
+
+#Plotting dendrograms
+plot(pressure_map_cluster_single, xlab="Single linkage", sub="")
+plot(pressure_map_cluster_complete, xlab="Complete linkage", sub="")
+plot(pressure_map_cluster_average, xlab="Average linkage", sub="")
+plot(pressure_map_cluster_ward, xlab="Ward linkage", sub="")
+```
+
+I chose **Ward linkage** because it minimizes within-cluster variance, resulting in more compact and well-separated clusters. This leads to clearer distinctions between clusters in the dendrogram. Compared to other methods, Ward linkage provides a better-defined hierarchical structure for grouping similar data points.
+
+\
+I plan to cut the dendrogram at 3 to form 3 distinct clusters, ensuring good separation between them. This cut provides a balance between cluster compactness and clear differentiation.
+
+```{r}
+#Cutting the tree when the are 3 clusters formed 
+hcl = cutree(pressure_map_cluster_ward, k = 3)
+table(hcl)
+```
+
+We now check the class agreement between Hierarchical clustering and actual observed labels.
+
+```{r}
+cat("The agreement between Hierarchical clustering and the ground truth labels =",
+classAgreement(table(hcl, pressure_data$Posture))$rand)
+```
+
+**K - Means Clustering:**
+
+Now lets take a look at the K-means clustering. To choose the right number of clusters (K) for K-means clustering, we look at the **within-group sum of squares (WGSS)** for different K values. We plot WGSS against K values and look for an **"elbow"** in the graph, which helps **determine** the **best** K. First, we calculate WGSS for K=1 **manually** because it has only **one cluster**, then run the K-means algorithm for K=2 to K=10, storing the results. Finally, we plot the WGSS to identify the elbow and find the optimal K.
+
+```{r}
+#Creating object to store within group sum of square
+wgss = rep(0, 10)
+
+#Calculating wgss for k 1 to 10
+wgss[1] = (n-1) * sum(apply(pressure_map_data, 2, var), na.rm = TRUE)
+for( k in 2:10){
+  wgss[k] = sum(kmeans(pressure_map_data, centers = k)$withinss)
+}
+```
+
+```{r}
+#plotting graph between k and WGSS
+plot(1:10, wgss, type="b", xlab="k", ylab="Within group sum of squares")
+```
+
+Looking at the graph, we can clearly see that there is a elbow at k=3.
+
+We now set **K=3** to divide the **pressure_map_data** into 3 clusters using **K-means clustering**. It runs the algorithm with **nstart = 20**, which means 20 random initializations to improve results.
+
+```{r}
+#Setting k=3 and performing kmeans with different initial clusters
+k = 3
+kclusters = kmeans(pressure_map_data, centers = k, nstart = 20)
+table(kclusters$cluster)
+```
+
+We now check the class agreement between K-Means clustering and actual observed labels.
+
+```{r}
+cat("The agreement between K-Means clustering and the ground truth labels =",
+classAgreement(table(kclusters$cluster, pressure_data$Posture))$rand)
+```
+
+We now use rand index to compare K-Means and Hierarchical Clustering.
+
+```{r}
+#computing the contingency table and passing to classAgreement
+contingency_table = table(kclusters$cluster, hcl)
+rand_index = classAgreement(contingency_table)$rand
+cat("The agreement between K-means and hierarchical clustering =", rand_index)
+```
+
+Hierarchical clustering with Ward linkage and Euclidean distance shows a **0.70** agreement with the ground truth, with clusters of sizes 211, 115, and 74. **K-means clustering** has a slightly lower agreement of **0.68**, with clusters of 64, 96, and 240. This is good work done by both the clustering algorithm because actual observed data has 3 different groups('Supine', 'Left', 'Right'). The **Rand index** between K-means and hierarchical clustering is **0.88**, indicating strong similarity. Both methods produce similar groupings but Hierarchical clustering have better agreement with observed labels.
+
+### 4. Classify posture using LDA and QDA
+
+```{r}
+#Performing LDA 
+data_lda_qda = data.frame(pressure_map_data,pressure_data$Posture)
+lda = lda(pressure_data.Posture ~ .,CV = TRUE,data = data_lda_qda)
+
+#Comparing the observed and predicted value
+table(lda$class, data_lda_qda$pressure_data.Posture)
+```
+
+```{r}
+#Calculating the misclassification rate
+miss_rate = 1 - 
+  (sum(diag(table(lda$class, data_lda_qda$pressure_data.Posture)))/
+     sum(table(lda$class, data_lda_qda$pressure_data.Posture)))
+cat("Misclassification Rate: ", miss_rate)
+```
+
+**Assessing the Performance of Classifiers**: The misclassification rate was approximated at 0.0725 (7.25%). It indicates that the model is performing very accurately with a comparatively low error rate.
+
+**Can you model a Quadratic Discriminant Analysis (QDA) to these data?** No, QDA requires sufficient data to estimate separate covariance matrices for separate classes. With 144 predictors and few samples per class, the covariance matrix is possibly non-invertible and QDA cannot be applied.
+
+**LDA and QDA Models Explanation**:
+
+LDA assumes the equal covariance matrices across classes and possesses linear decision boundaries. It is suitable for smaller sample sizes as well as simpler data structures.
+
+QDA assumes different covariance matrices for each class, and hence there are quadratic decision boundaries. QDA is undesirable, however, when working with high-dimensional data and small samples since it needs sufficient data to be able to estimate the matrices sufficiently well.
+
+### 5. PCA
+
+The **prcomp()** function is used to fit the Principal Component Analysis (PCA) model. Since the pressure variables (V1 - V144) are on the same scale, scaling the data is unnecessary. The standard deviations from **prcomp()** are accessed via the **\$sdev** property, and the variance is obtained by squaring these values. The cumulative variance is calculated by taking the cumulative sum of the squared variances and dividing by the total sum. This cumulative proportion is stored in the cum_var variable, which is used for plotting.
+
+```{r}
+#Applying PCA to the pressure data 
+pca = prcomp(pressure_map_data)
+
+#Calculating the cumulative variance
+cum_var = cumsum(pca$sdev^2) / sum(pca$sdev^2)
+
+#Plotting the graph between cumulative vs principal components
+pca_plot = ggplot() + 
+  geom_point(aes(1:144, cum_var), shape = 19, cex = 0.5, color = "blue")+
+  labs(x = "Number Principal Components", 
+       y = "Cumulative Variance")
+```
+
+```{r}
+#calculating the number of principal component needed to represent 90% of variance
+no_of_pca = length(cum_var[cum_var <= 0.90])
+pca_plot + geom_point(aes(no_of_pca, cum_var[no_of_pca]), color = "red")
+cat("Number of PC's to capture 90% of the variance:",
+    no_of_pca)
+```
+
+```{r}
+posture = factor(
+  pressure_data$Posture, 
+  levels=c(1,2,3),
+  labels = c("Supine","Left","Right"))
+
+#plotting graph for first 2 PC's
+pc_2 = data.frame(pca$x[,1:2], 
+                  posture = posture)
+ggplot(pc_2, aes(x = PC1, y = PC2, color = posture)) +
+  geom_point(size = 3, alpha = 0.7) +
+  labs(title = "Pressure Data Projected onto the First Two Principal Components",
+       x = "PC1",
+       y = "PC2") +
+  theme_minimal()
+```
+
+**PC1 distinguishes "Left" (negative) from "Right" (positive) postures, with "Supine" centered. PC2 reflects variability, especially within the "Left" posture.** PC1 represents major posture differences, while PC2 captures secondary variations.
+
+### 6. Plotting Decision Boundary
+
+```{r}
+boundary <- function(model,
+                     data,class = NULL,
+                     predict_type = "class",
+                     resolution = 100,
+                     showgrid = TRUE, ...) {
+  if(!is.null(class)) cl <- data[,class] else cl <- 1
+  data <- data[,1:2]
+  k <- length(unique(cl))
+  plot(data, col = as.integer(cl)+1L, pch = as.integer(cl)+1L, ...)
+  
+  # make grid
+  r <- sapply(data, range, na.rm = TRUE)
+  xs <- seq(r[1,1], r[2,1], length.out = resolution)
+  ys <- seq(r[1,2], r[2,2], length.out = resolution)
+  g <- cbind(rep(xs, each=resolution), rep(ys, time = resolution))
+  colnames(g) <- colnames(r)
+  g <- as.data.frame(g)
+  
+  p <- predict(model, g, type = predict_type)
+  if(is.list(p)) p <- p$class
+  p <- as.factor(p)
+  if(showgrid) points(g, col = as.integer(p)+1L, pch = ".")
+  z <- matrix(as.integer(p), nrow = resolution, byrow = TRUE)
+  contour(xs, ys, z, add = TRUE, drawlabels = FALSE,
+  lwd = 2, levels = (1:(k-1))+.5)
+  invisible(z)
+}
+
+row.names(pc_2) = seq(1:nrow(pc_2))
+lda_model = lda(posture ~ PC1 + PC2, data = pc_2)
+boundary(lda_model, pc_2, class = "posture", main="LDA")
+```
+
+### 7. Classify Subject using LDA and QDA
+
+```{r}
+#data frame with selected pca's and posture class
+pca_data = data.frame(pca$x[,1:no_of_pca], pressure_data$Subject)
+#Performing LDA for the selected PCA's
+lda_pca = lda(pressure_data.Subject ~ ., CV = TRUE, data = pca_data)
+#Performing QDA for selected PCA's
+qda_pca = qda(pressure_data.Subject ~ ., CV = TRUE, data = pca_data)
+
+#Calculating the misclassification rate
+miss_rate_lda = 1 - 
+  (sum(diag(table(lda_pca$class, pressure_data$Subject)))/
+     sum(table(lda_pca$class, pressure_data$Subject)))
+cat("Misclassification Rate of lda using 2 pca: ", miss_rate_lda)
+
+miss_rate_qda = 1 - 
+  (sum(diag(table(qda_pca$class, pressure_data$Subject)))/
+     sum(table(qda_pca$class, pressure_data$Subject)))
+cat("\nMisclassification Rate of qda using 2 pca: ", miss_rate_qda)
+```
+
+LDA outperforms QDA because it is making assumptions of linear class boundaries, and these seem better suited to the data. QDA with 400 observations and 34 principal components can fall victim to the curse of dimensionality because there isn't enough data to accurately estimate class-specific covariance matrices. That the misclassification rate is greater for QDA is a sign of overfitting, while LDA is less so with fewer parameters to estimate.
+
+Since we did not standardize the data before we performed PCA, we calculated the principal components based on the covariance matrix. Standardization would have made all variables variance 1, which would have turned the covariance matrix into a correlation matrix. We skipped standardization because all the pressure readings (V1 - V144) are measured in the same units. Their variances are naturally comparable, and standardization is not necessary, so we allowed PCA to retain the original variance structure.
+
+### 8. PCR Synopsis
+
+**Purpose of PCR**
+
+**Principal Components Regression (PCR)** is a **statistical method** for addressing **multicollinearity** in **regression** analysis. It is particularly useful when the **predictor** variables are highly **intercorrelated**, e.g., pressure values for the estimation of **Body Mass Index (BMI)**. PCR **avoids** **overfitting** by transforming the original predictors into fewer uncorrelated principal components and then applying **linear regression** to the components for deriving a more stable model.
+
+**PCR works in two steps in general**
+
+**Principal Component Analysis (PCA)**
+
+PCA is applied to the predictor variables to derive the principal components (PCs), linear combinations of the original predictors. The components are correlated and ordered by the percentage of variance that they explain, with the first few components explaining much of the variability in the data.
+
+**Regression on Principal Components**
+
+After obtaining PCs, PCR uses linear regression on a subset of the components that explain most of the data variance to prevent overfitting.
+
+**Choices in the Use of PCR**
+
+**Number of Principal Components**: The PC's are chosen according to the variance they explain, typically guided by cumulative explained variance.
+
+**Scaling and Centering of Data**: Recommend centering and scaling the predictor variables before applying PCA so that all the variables will have the equal contribution, especially when they have different units or variances.
+
+**Advantages of PCR**
+
+-   **Multicollinearity Handling**: PCR effectively handles multicollinearity by converting correlated predictors to uncorrelated components.
+
+-   **Dimensionality Reduction**: PCR simplifies the complexity and prevents overfitting by reducing the model through highlighting a few principal components, thereby improving generalizability.
+
+-   **Flexibility**: No assumption is made by PCR about the predictors-response relationship, and therefore it is flexible for all kinds of data.
+
+**Disadvantages of PCR**
+
+-   **Interpretation of Components**: The principal components from which the data are constructed, one way or the other, may turn out to be very hard to interpret, particularly in the case of pressure measurements, etc.
+
+-   **Information Loss**: Useful information is likely to be discarded since only a subset of all principal components is used in the modeling, thereby reducing model performance.
+
+-   **Assumption of Linearity**: The assumptions of PCR dictate a linear relation between the principal components and the response variable, which may not be true for complex data.
+
+### 9. Performing PCR
+
+```{r}
+# Loading the datasets
+subject_info_data <- read.csv('Subject_info_data.csv')
+
+# Calculating BMI
+subject_info <- subject_info_data |>
+  mutate(BMI = Weight.kg / (Height.cm / 100)^2)
+
+subject_info = subject_info[,c(1,5)]
+
+# Ensuring Subject column
+subject_info$Subject.Number <- paste0("S", subject_info$Subject.Number)
+
+#Converting the data type
+pressure_data$Subject <- as.character(pressure_data$Subject)
+subject_info$Subject.Number <- as.character(subject_info$Subject.Number)
+
+#Changing the name for joining the dataset
+colnames(subject_info)[1] = "Subject"
+
+# Merging datasets using left_join()
+merged_data <- left_join(pressure_data, subject_info, by = "Subject")
+```
+
+```{r}
+#Setting seed and splitting training and test data
+set.seed(24222076)
+train_index = sample(1:400, 320)
+test_index = setdiff(1:400, train_index)
+
+train_data = merged_data[train_index,]
+test_data = merged_data[test_index,]
+
+x_train = train_data[,2:145]
+y_train = train_data$BMI
+
+x_test = test_data[,2:145]
+y_test = test_data$BMI
+
+#Doing principal component regression
+pcr = pcr(y_train ~ ., data = x_train,
+          validation = "CV")
+
+#Plotting the validation plot
+validationplot(pcr, val.type = "MSEP")
+```
+
+The number of components was found using cross-validation to select the number that will produce the minimum prediction error sum of squares (PRESS). The function **validationplot(pcr, val.type = "MSEP")** is employed to plot the Mean Squared Error of Prediction (MSEP) against different numbers of components. The optimum number of components was found from the minimum MSEP, which will balance model complexity and generalizability and avoid overfitting.
+
+```{r}
+#Finding number of component that minimizes MSE
+ncomp = which.min(pcr$validation$PRESS)
+
+#Predicting the result
+y_pred <- predict(pcr, x_test, ncomp = ncomp)
+
+#Calculating MSE,RMSE, and R2
+mse <- mean((y_test - y_pred)^2)
+rmse <- sqrt(mse)
+
+SSE <- sum((y_test - y_pred)^2)
+SST <- sum((y_test - mean(y_test))^2)
+
+r2 = 1 - (SSE/SST)
+
+# Print model evaluation metrics
+cat("Mean Squared Error (MSE):", mse, "\n")
+cat("Root Mean Squared Error (RMSE):", rmse, "\n")
+cat("R-squared:", r2, "\n")
+```
+
+The MSE of 10.87 informs us about the mean squared error between predicted and actual BMI values. The RMSE of 3.297 informs us that the model is off by around 3.297 units of BMI on average. The 0.24 R-squared shows that the model only explains 24.14% of the variance in BMI, meaning it's not capturing much of the underlying pattern.
+
+The data set consists of pressure maps, which are pressure distributions on 64x27 grids, downsampled to 16x9. This gives rise to 144 variables (V1-V144), which are spatial and could have complex relationships not explained under a simple linear model like Principal Component Regression (PCR).
+
+Pressure data reflects the way body mass is distributed along a mattress surface, which might be more driven by posture or shape of body than by BMI. BMI results from both weight and height. Therefore, the model is insufficient to calculate precise BMI on its own, yet it can provide a weak prediction signal.
+
+To prove this point, we filter out supine data and we perform PCR for this.
+
+```{r}
+#Filtering the supine data
+merged_data_supine = merged_data |> filter(merged_data$Posture %in% 1)
+set.seed(24222076)
+n = nrow(merged_data_supine)
+#Splitting train, test data
+train_index_supine = sample(1:n, n*0.80)
+test_index_supine = setdiff(1:n, train_index)
+train_data_supine = merged_data_supine[train_index_supine,]
+test_data_supine = merged_data_supine[test_index_supine,]
+x_train_supine = train_data_supine[,2:145]
+y_train_supine = train_data_supine$BMI
+x_test_supine = test_data_supine[,2:145]
+y_test_supine = test_data_supine$BMI
+#Performing PCR
+pcr_supine = pcr(y_train_supine ~ ., data = x_train_supine,
+          validation = "CV")
+ncomp_supine = which.min(pcr_supine$validation$PRESS)
+y_pred_supine <- predict(pcr_supine, x_test_supine, ncomp = ncomp_supine)
+#Calculating the metrices
+mse_supine <- mean((y_test_supine - y_pred_supine)^2)
+rmse_supine <- sqrt(mse_supine)
+SSE_supine <- sum((y_test_supine - y_pred_supine)^2)
+SST_supine <- sum((y_test_supine - mean(y_test_supine))^2)
+r2_supine = 1 - (SSE_supine/SST_supine)
+# Print model evaluation metrics
+cat("Mean Squared Error (MSE):", mse_supine, "\n")
+cat("Root Mean Squared Error (RMSE):", rmse_supine, "\n")
+cat("R-squared:", r2_supine, "\n")
+```
+
+Thus, we can see a significant improvement in the model. It proves that the pressure points depends on the posture rather than BMI of the subject.
